@@ -47,6 +47,7 @@ const INITIAL_DB = {
       projectName: '토성초등학교 공간재구조화 및 리모델링공사',
       supervisorName: '홍길동',
       category: '품질 관리',
+      summary: '[품질 관리] 2층 복도 단차 부위 마감 몰탈 불량 전면 재시공 지시',
       floor: '2층',
       floorPlanUrl: 'https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=800&q=80',
       pin: { x: 45, y: 35 },
@@ -308,37 +309,68 @@ app.post('/api/ai-refine', async (req, res) => {
 
     const prompt = `
 당신은 교육청 학교시설공사 공사감독관입니다.
-현장에서 감독관이 음성 또는 텍스트로 남긴 거친 구두 메모를 정식 [공사감독일지]의 '업무 내용 및 지시사항' 규격에 맞게 격식 있고 단호한 문장으로 다듬어주세요.
+현장에서 감독관이 음성 또는 텍스트로 남긴 거친 구두 메모를 정식 [공사감독일지]에 기록할 1) '주요 업무(한 줄 핵심 요약)'와 2) '업무 내용 및 지시사항(공문서체 상세 2~3문장)'으로 각각 다듬어주세요.
 
 - 지적 구분: ${category}
 - 현장 메모 원문: "${memo}"
 
-[작성 지침 - 절대 준수]
-1. 불필요한 설명, 인사말, 선택 옵션, 마크다운 기호(따옴표, 볼드 ** 표시) 없이 '오직 최종 공문 지시사항 문장'만 2~3문장으로 출력하세요.
-2. 단호하고 명확한 공문서체(~할 것을 지시함, ~즉시 조치 요망, ~작업 중지 지시 등)를 사용하세요.
+[작성 및 출력 지침 - 절대 준수]
+반드시 다음 JSON 형식으로만 응답하고 다른 설명이나 인사말, 코드블록 태그는 일체 붙이지 마세요.
+{
+  "summary": "핵심 행위 및 시정 조치 내용을 간결하게 나타낸 한 줄 요약 (예: 용접 작업 화재예방 안전조치 미이행에 따른 작업 중지 및 시정 지시)",
+  "text": "공문서 규격의 상세 업무 내용 및 지시사항 2~3문장 (~할 것을 지시함, ~즉시 조치 요망 등 단호한 공문서체)"
+}
     `.trim();
 
-    let refinedText = '';
+    let rawResponse = '';
     let lastError = null;
 
     for (const modelName of candidateModels) {
       try {
         const model = aiInstance.getGenerativeModel({ model: modelName });
         const result = await model.generateContent(prompt);
-        refinedText = result.response.text().trim();
-        if (refinedText) break;
+        rawResponse = result.response.text().trim();
+        if (rawResponse) break;
       } catch (err) {
         lastError = err;
         console.warn(`[Gemini] ${modelName} 시도 실패, 다음 모델로 대체:`, err.message);
       }
     }
 
-    if (!refinedText) {
+    if (!rawResponse) {
       throw lastError || new Error('모든 Gemini 모델 응답 실패');
     }
 
-    console.log('[AI 정제 성공]:', refinedText);
-    res.json({ success: true, text: refinedText });
+    // JSON 파싱 및 정제
+    let summary = '';
+    let refinedText = '';
+
+    const cleanJson = rawResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
+    try {
+      const parsed = JSON.parse(cleanJson);
+      summary = (parsed.summary || '').trim();
+      refinedText = (parsed.text || parsed.content || '').trim();
+    } catch (parseErr) {
+      // 정규식으로 summary와 text 추출 시도
+      const summaryMatch = cleanJson.match(/"summary"\s*:\s*"([^"]+)"/);
+      const textMatch = cleanJson.match(/"(?:text|content)"\s*:\s*"([^"]+)"/);
+      if (summaryMatch && summaryMatch[1]) summary = summaryMatch[1].trim();
+      if (textMatch && textMatch[1]) refinedText = textMatch[1].trim();
+    }
+
+    // fallback
+    if (!refinedText) {
+      refinedText = cleanJson;
+    }
+    if (!summary) {
+      const firstLine = refinedText.split(/[\r\n.]/)[0].trim();
+      summary = firstLine.length > 0 && firstLine.length <= 40
+        ? firstLine
+        : `${category} 관련 현장 검측 및 조치 지시`;
+    }
+
+    console.log('[AI 정제 성공] summary:', summary, '| text:', refinedText);
+    res.json({ success: true, summary, text: refinedText });
   } catch (error) {
     console.error('[Gemini AI 요약 오류]:', error);
     res.status(500).json({
@@ -350,7 +382,7 @@ app.post('/api/ai-refine', async (req, res) => {
 
 // [API 2] A4 규격 공사감독일지 PDF 첨부 이메일 발송
 app.post('/api/send-email', async (req, res) => {
-  const { toEmail, projectName = '미지정 공사', date, category = '일반', content = '', pdfBase64 } = req.body;
+  const { toEmail, projectName = '미지정 공사', date, category = '일반', summary = '', content = '', pdfBase64 } = req.body;
 
   if (!toEmail) {
     return res.status(400).json({ success: false, message: '수신자 이메일이 지정되지 않았습니다.' });
@@ -363,6 +395,9 @@ app.post('/api/send-email', async (req, res) => {
 
   // 파일명에 사용 불가능한 특수문자 제거
   const safeProjectName = String(projectName).replace(/[\\/:*?"<>|]/g, '_');
+
+  // 주요 업무 한 줄 요약 텍스트
+  const displaySummary = summary || `[${category}] 관련 현장 검측 및 시정 조치 지시`;
 
   // Base64 순수 데이터 추출 (jsPDF의 'data:application/pdf;filename=...;base64,' 접두사 완벽 제거)
   let cleanBase64 = String(pdfBase64 || '').trim();
@@ -389,7 +424,8 @@ app.post('/api/send-email', async (req, res) => {
 ■ 공사명: ${projectName}
 ■ 점검일자: ${safeDate}
 ■ 지적구분: ${category}
-■ 주요 업무 내용 및 지시사항:
+■ 주요 업무: ${displaySummary}
+■ 업무 내용 및 지시사항:
 ${content}
 
 상기 지적사항에 대하여 즉시 안전 및 품질 기준에 적합하게 시정 조치하시기 바랍니다.
@@ -460,7 +496,8 @@ ${content}
 ■ 공사명: ${projectName}
 ■ 점검일자: ${safeDate}
 ■ 지적구분: ${category}
-■ 주요 업무 내용 및 지시사항:
+■ 주요 업무: ${displaySummary}
+■ 업무 내용 및 지시사항:
 ${content}
 
 상기 지적사항에 대하여 즉시 안전 및 품질 기준에 적합하게 시정 조치하시기 바랍니다.
