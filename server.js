@@ -20,6 +20,10 @@ const DB_DIR = path.join(__dirname, 'data');
 const DB_FILE = path.join(DB_DIR, 'database.json');
 
 const INITIAL_DB = {
+  settings: {
+    tone: 'polite',
+    customPrompt: '',
+  },
   projects: [
     {
       id: 1,
@@ -146,15 +150,35 @@ const createEmailTransporter = () => {
 const transporter = createEmailTransporter();
 
 // ==========================================
-// [API 0-1] 중앙 데이터 조회 (현장 목록 & 지적 대장)
+// [API 0-1] 중앙 데이터 조회 (현장 목록 & 지적 대장 & AI 설정)
 // ==========================================
 app.get('/api/data', (req, res) => {
   try {
     const db = readDb();
-    res.json({ success: true, projects: db.projects || [], issues: db.issues || [] });
+    res.json({
+      success: true,
+      projects: db.projects || [],
+      issues: db.issues || [],
+      settings: db.settings || { tone: 'polite', customPrompt: '' },
+    });
   } catch (err) {
     console.error('데이터 조회 오류:', err);
     res.status(500).json({ success: false, error: '데이터 조회 실패' });
+  }
+});
+
+// [API 0-1-B] AI 어조 및 프롬프트 설정 저장/동기화
+app.post('/api/settings', (req, res) => {
+  const newSettings = req.body;
+  try {
+    const db = readDb();
+    db.settings = { ...(db.settings || { tone: 'polite', customPrompt: '' }), ...newSettings };
+    writeDb(db);
+    console.log('[AI 설정 동기화 완료]:', db.settings);
+    res.json({ success: true, settings: db.settings });
+  } catch (err) {
+    console.error('AI 설정 저장 오류:', err);
+    res.status(500).json({ success: false, error: '설정 저장 실패' });
   }
 });
 
@@ -286,7 +310,7 @@ app.post('/api/auth/kakao', async (req, res) => {
 
 // [API 1] 현장 음성 구두 메모 -> 공사감독일지 지시사항 문장 AI 정제
 app.post('/api/ai-refine', async (req, res) => {
-  const { category = '일반', memo } = req.body;
+  const { category = '일반', memo, tone = 'polite', customPrompt = '' } = req.body;
   if (!memo || !memo.trim()) {
     return res.status(400).json({ success: false, message: '메모 내용이 없습니다.' });
   }
@@ -307,18 +331,47 @@ app.post('/api/ai-refine', async (req, res) => {
       'gemini-flash-latest',
     ];
 
+    let styleInstruction = '';
+    if (customPrompt && customPrompt.trim()) {
+      styleInstruction = `
+[사용자 지정 스타일 및 학습 지침 (최우선 적용)]
+${customPrompt.trim()}
+`.trim();
+    } else if (tone === 'cooperative') {
+      styleInstruction = `
+[어조 및 작성 지침: 상호 협력형]
+1. 현장 시공사 및 관계자와의 원활한 소통을 위해 상호 존중하는 친절한 공문서체를 사용하세요.
+2. 강압적인 명령이나 과도한 행정 제재 언급을 지양하고, 부드러운 협조 요청과 권고 표현(~조치하여 주시기 바랍니다, ~협조 부탁드립니다, ~확인 및 보완 바랍니다 등)을 사용하세요.
+`.trim();
+    } else if (tone === 'strict') {
+      styleInstruction = `
+[어조 및 작성 지침: 엄격한 안전감독관형]
+1. 안전 사고 예방 및 중대 하자 방지를 위해 명확하고 단호한 공문서체(~할 것을 지시함, ~즉시 조치 요망 등)를 사용하세요.
+2. 단, 법적 근거 없는 불필요한 감정적 비난이나 과장된 처벌 협박 문구는 배제하세요.
+`.trim();
+    } else {
+      // polite (정중한 표준 공문형 - 기본 권장)
+      styleInstruction = `
+[어조 및 작성 지침: 정중하고 품격 있는 표준 공문서형 (권장)]
+1. 감정적이거나 과도하게 위압적인 표현(예: '강력한 행정 조치', '처벌 예정', '형사 고발' 등 불필요한 위협적 문구)은 일체 사용하지 마세요.
+2. 현장의 객관적인 미흡 사실과 이에 따른 구체적인 시정·보완 조치 요구사항을 품격 있고 정중한 공문서체(~조치하여 주시기 바랍니다, ~보완 및 확인 요망, ~정비 후 작업 진행 요망 등)로 명확하게 전달하세요.
+`.trim();
+    }
+
     const prompt = `
 당신은 교육청 학교시설공사 공사감독관입니다.
-현장에서 감독관이 음성 또는 텍스트로 남긴 거친 구두 메모를 정식 [공사감독일지]에 기록할 1) '주요 업무(한 줄 핵심 요약)'와 2) '업무 내용 및 지시사항(공문서체 상세 2~3문장)'으로 각각 다듬어주세요.
+현장에서 감독관이 음성 또는 텍스트로 남긴 거친 구두 메모를 정식 [공사감독일지]에 기록할 1) '주요 업무(한 줄 핵심 요약)'와 2) '업무 내용 및 지시사항(상세 2~3문장)'으로 정제해주세요.
 
 - 지적 구분: ${category}
 - 현장 메모 원문: "${memo}"
 
+${styleInstruction}
+
 [작성 및 출력 지침 - 절대 준수]
-반드시 다음 JSON 형식으로만 응답하고 다른 설명이나 인사말, 코드블록 태그는 일체 붙이지 마세요.
+반드시 다음 JSON 형식으로만 응답하고 다른 설명이나 인사말, 코드블록 태그(백틱)는 일체 붙이지 마세요.
 {
-  "summary": "핵심 행위 및 시정 조치 내용을 간결하게 나타낸 한 줄 요약 (예: 용접 작업 화재예방 안전조치 미이행에 따른 작업 중지 및 시정 지시)",
-  "text": "공문서 규격의 상세 업무 내용 및 지시사항 2~3문장 (~할 것을 지시함, ~즉시 조치 요망 등 단호한 공문서체)"
+  "summary": "핵심 행위 및 시정 조치 내용을 간결하게 나타낸 한 줄 요약 (예: 교실 바닥 연마 작업 시 비산먼지 차단 보양 조치 및 환경 정비 요망)",
+  "text": "객관적 사실과 정중한 시정 요구사항이 담긴 품격 있는 상세 지시 문장 2~3문장"
 }
     `.trim();
 
