@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 require('dotenv').config();
 
@@ -10,6 +12,80 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// ==========================================
+// [중앙 데이터베이스 모듈] PC & 모바일 실시간 동기화
+// ==========================================
+const DB_DIR = path.join(__dirname, 'data');
+const DB_FILE = path.join(DB_DIR, 'database.json');
+
+const INITIAL_DB = {
+  projects: [
+    {
+      id: 1,
+      name: '토성초등학교 공간재구조화 및 리모델링공사',
+      managerEmail: 'site_toseong@example.com',
+      supervisorName: '홍길동',
+      plans: [
+        {
+          floor: '1층',
+          url: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=800&q=80',
+          filename: 'plan_1f.jpg',
+        },
+        {
+          floor: '2층',
+          url: 'https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=800&q=80',
+          filename: 'plan_2f.jpg',
+        },
+      ],
+    },
+  ],
+  issues: [
+    {
+      id: 101,
+      projectId: 1,
+      projectName: '토성초등학교 공간재구조화 및 리모델링공사',
+      supervisorName: '홍길동',
+      category: '품질 관리',
+      floor: '2층',
+      floorPlanUrl: 'https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=800&q=80',
+      pin: { x: 45, y: 35 },
+      photoUrl: 'https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=800&q=80',
+      content: '2층 복도 단차 부위 마감 몰탈 불량 및 재료분리대 수평 오차 발생. 전면 재시공 요망.',
+      createdAt: '2026-11-04 (수)',
+      weather: { condition: '맑음', high: '19', low: '9' },
+      isSent: false,
+    },
+  ],
+};
+
+function readDb() {
+  try {
+    if (!fs.existsSync(DB_DIR)) {
+      fs.mkdirSync(DB_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(DB_FILE)) {
+      fs.writeFileSync(DB_FILE, JSON.stringify(INITIAL_DB, null, 2), 'utf-8');
+      return INITIAL_DB;
+    }
+    const data = fs.readFileSync(DB_FILE, 'utf-8');
+    return JSON.parse(data);
+  } catch (err) {
+    console.error('DB 읽기 오류:', err);
+    return INITIAL_DB;
+  }
+}
+
+function writeDb(data) {
+  try {
+    if (!fs.existsSync(DB_DIR)) {
+      fs.mkdirSync(DB_DIR, { recursive: true });
+    }
+    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('DB 쓰기 오류:', err);
+  }
+}
 
 if (!process.env.GEMINI_API_KEY) {
   console.warn('⚠️ GEMINI_API_KEY 환경변수가 설정되지 않았습니다.');
@@ -67,6 +143,67 @@ const createEmailTransporter = () => {
 };
 
 const transporter = createEmailTransporter();
+
+// ==========================================
+// [API 0-1] 중앙 데이터 조회 (현장 목록 & 지적 대장)
+// ==========================================
+app.get('/api/data', (req, res) => {
+  try {
+    const db = readDb();
+    res.json({ success: true, projects: db.projects || [], issues: db.issues || [] });
+  } catch (err) {
+    console.error('데이터 조회 오류:', err);
+    res.status(500).json({ success: false, error: '데이터 조회 실패' });
+  }
+});
+
+// [API 0-2] 현장 정보 저장/수정 동기화
+app.post('/api/projects', (req, res) => {
+  const project = req.body;
+  if (!project || !project.name) {
+    return res.status(400).json({ success: false, message: '현장 정보가 올바르지 않습니다.' });
+  }
+
+  try {
+    const db = readDb();
+    const existingIndex = db.projects.findIndex((p) => p.id === project.id);
+    if (existingIndex !== -1) {
+      db.projects[existingIndex] = project;
+    } else {
+      db.projects.push(project);
+    }
+    writeDb(db);
+    console.log(`[현장 동기화 완료]: ${project.name}`);
+    res.json({ success: true, projects: db.projects });
+  } catch (err) {
+    console.error('현장 저장 오류:', err);
+    res.status(500).json({ success: false, error: '현장 저장 실패' });
+  }
+});
+
+// [API 0-3] 지적사항 등록/수정 동기화
+app.post('/api/issues', (req, res) => {
+  const issue = req.body;
+  if (!issue || !issue.projectName) {
+    return res.status(400).json({ success: false, message: '지적 정보가 올바르지 않습니다.' });
+  }
+
+  try {
+    const db = readDb();
+    const existingIndex = db.issues.findIndex((i) => i.id === issue.id);
+    if (existingIndex !== -1) {
+      db.issues[existingIndex] = issue;
+    } else {
+      db.issues.unshift(issue);
+    }
+    writeDb(db);
+    console.log(`[지적사항 동기화 완료]: ID ${issue.id} - ${issue.projectName}`);
+    res.json({ success: true, issues: db.issues });
+  } catch (err) {
+    console.error('지적사항 저장 오류:', err);
+    res.status(500).json({ success: false, error: '지적사항 저장 실패' });
+  }
+});
 
 // [API 0] 카카오 OAuth 인가 코드 처리 및 로그인
 app.post('/api/auth/kakao', async (req, res) => {
