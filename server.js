@@ -205,6 +205,21 @@ app.post('/api/issues', (req, res) => {
   }
 });
 
+// [API 0-4] 현장 삭제 동기화
+app.delete('/api/projects/:id', (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const db = readDb();
+    db.projects = (db.projects || []).filter((p) => p.id !== id);
+    writeDb(db);
+    console.log(`[현장 삭제 완료]: ID ${id}`);
+    res.json({ success: true, projects: db.projects });
+  } catch (err) {
+    console.error('현장 삭제 오류:', err);
+    res.status(500).json({ success: false, error: '현장 삭제 실패' });
+  }
+});
+
 // [API 0] 카카오 OAuth 인가 코드 처리 및 로그인
 app.post('/api/auth/kakao', async (req, res) => {
   const { code, redirectUri } = req.body;
