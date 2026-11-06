@@ -176,12 +176,62 @@ app.post('/api/send-email', async (req, res) => {
 
   // 파일명에 사용 불가능한 특수문자 제거
   const safeProjectName = String(projectName).replace(/[\\/:*?"<>|]/g, '_');
+  const cleanBase64 = String(pdfBase64 || '').replace(/^data:[^;]+;base64,/, '');
 
-  // PDF 첨부파일 Base64 파싱 및 Buffer 처리
-  const attachments = [];
-  if (pdfBase64) {
+  // 1. Resend API 키가 설정되어 있는 경우 (Render 무료 플랜 권장: HTTPS 443 포트)
+  if (process.env.RESEND_API_KEY) {
     try {
-      const cleanBase64 = String(pdfBase64).replace(/^data:[^;]+;base64,/, '');
+      const resendPayload = {
+        from: process.env.RESEND_FROM || '공사감독시스템 <onboarding@resend.dev>',
+        to: [toEmail],
+        subject: `[공사감독일지 시정지시] ${projectName} (${category}) - ${safeDate}`,
+        text: `
+안녕하십니까, 현장소장님.
+
+[${projectName}] 현장 공사감독일지 및 현장 지적사항을 통보합니다.
+상세 지적 위치와 현장 사진이 포함된 정식 공사감독일지는 첨부된 PDF 파일을 확인하시기 바랍니다.
+
+■ 공사명: ${projectName}
+■ 점검일자: ${safeDate}
+■ 지적구분: ${category}
+■ 주요 업무 내용 및 지시사항:
+${content}
+
+상기 지적사항에 대하여 즉시 안전 및 품질 기준에 적합하게 시정 조치하시기 바랍니다.
+        `.trim(),
+        attachments: cleanBase64 ? [
+          {
+            filename: `공사감독일지_${safeProjectName}_${safeDate}.pdf`,
+            content: cleanBase64,
+          }
+        ] : [],
+      };
+
+      const resendRes = await axios.post('https://api.resend.com/emails', resendPayload, {
+        headers: {
+          Authorization: `Bearer ${process.env.RESEND_API_KEY.trim()}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      console.log('[Resend 이메일 발송 성공] ID:', resendRes.data?.id);
+      return res.json({
+        success: true,
+        message: '이메일 및 A4 PDF 첨부 발송 완료 (Resend API)',
+        id: resendRes.data?.id,
+      });
+    } catch (resendErr) {
+      const errDetail = resendErr.response?.data || resendErr.message;
+      console.error('[Resend 발송 오류]:', errDetail);
+      const errMsg = errDetail?.message || JSON.stringify(errDetail);
+      return res.status(500).json({ success: false, error: 'Resend 발송 실패: ' + errMsg });
+    }
+  }
+
+  // 2. 기존 SMTP 전송 방식 (Resend 키가 없을 때 fallback)
+  const attachments = [];
+  if (cleanBase64) {
+    try {
       attachments.push({
         filename: `공사감독일지_${safeProjectName}_${safeDate}.pdf`,
         content: Buffer.from(cleanBase64, 'base64'),
