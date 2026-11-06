@@ -176,7 +176,15 @@ app.post('/api/send-email', async (req, res) => {
 
   // 파일명에 사용 불가능한 특수문자 제거
   const safeProjectName = String(projectName).replace(/[\\/:*?"<>|]/g, '_');
-  const cleanBase64 = String(pdfBase64 || '').replace(/^data:[^;]+;base64,/, '');
+
+  // Base64 순수 데이터 추출 (jsPDF의 'data:application/pdf;filename=...;base64,' 접두사 완벽 제거)
+  let cleanBase64 = String(pdfBase64 || '').trim();
+  const commaIdx = cleanBase64.indexOf(',');
+  if (commaIdx !== -1 && cleanBase64.startsWith('data:')) {
+    cleanBase64 = cleanBase64.substring(commaIdx + 1).trim();
+  }
+
+  console.log(`[PDF 첨부파일 디버그] 순수 Base64 길이: ${cleanBase64.length}자 (약 ${(cleanBase64.length * 0.75 / 1024).toFixed(1)} KB)`);
 
   // 1. Resend API 키가 설정되어 있는 경우 (Render 무료 플랜 권장: HTTPS 443 포트)
   if (process.env.RESEND_API_KEY) {
