@@ -16,16 +16,57 @@ if (!process.env.GEMINI_API_KEY) {
 }
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
-const smtpPort = Number(process.env.SMTP_PORT) || 587;
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: smtpPort,
-  secure: smtpPort === 465,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+const createEmailTransporter = () => {
+  const host = (process.env.SMTP_HOST || '').toLowerCase();
+
+  // 1. 네이버 메일인 경우 (네이버 전용 SSL 465 포트 강제 적용)
+  if (host.includes('naver')) {
+    return nodemailer.createTransport({
+      service: 'naver',
+      host: 'smtp.naver.com',
+      port: 465,
+      secure: true,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+      tls: {
+        rejectUnauthorized: false,
+      },
+    });
+  }
+
+  // 2. 구글 지메일인 경우
+  if (host.includes('gmail')) {
+    return nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
+  }
+
+  // 3. Ethereal 및 일반 SMTP
+  const port = Number(process.env.SMTP_PORT) || 465;
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: port,
+    secure: port === 465,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+    tls: {
+      rejectUnauthorized: false,
+    },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+  });
+};
+
+const transporter = createEmailTransporter();
 
 // [API 0] 카카오 OAuth 인가 코드 처리 및 로그인
 app.post('/api/auth/kakao', async (req, res) => {
