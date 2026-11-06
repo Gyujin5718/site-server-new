@@ -207,9 +207,10 @@ ${content}
         ] : [],
       };
 
+      const resendApiKey = (process.env.RESEND_API_KEY || '').trim().replace(/^['"]|['"]$/g, '');
       const resendRes = await axios.post('https://api.resend.com/emails', resendPayload, {
         headers: {
-          Authorization: `Bearer ${process.env.RESEND_API_KEY.trim()}`,
+          Authorization: `Bearer ${resendApiKey}`,
           'Content-Type': 'application/json',
         },
       });
