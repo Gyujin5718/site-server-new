@@ -138,26 +138,61 @@ app.post('/api/ai-refine', async (req, res) => {
     return res.status(400).json({ success: false, message: '메모 내용이 없습니다.' });
   }
 
+  const apiKey = (process.env.GEMINI_API_KEY || '').trim().replace(/['"\r\n\t]/g, '');
+  if (!apiKey) {
+    console.error('❌ GEMINI_API_KEY 환경변수가 설정되지 않았습니다.');
+    return res.status(500).json({ success: false, error: '서버에 GEMINI_API_KEY가 설정되지 않았습니다.' });
+  }
+
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const aiInstance = new GoogleGenerativeAI(apiKey);
+    // 최신 지원 모델 목록 우선순위 시도 (gemini-3.1-flash-lite 권장)
+    const candidateModels = [
+      'gemini-3.1-flash-lite',
+      'gemini-3.5-flash-lite',
+      'gemini-3.8-flash',
+      'gemini-flash-latest',
+    ];
+
     const prompt = `
 당신은 교육청 학교시설공사 공사감독관입니다.
-현장에서 감독관이 음성으로 남긴 거친 구두 메모를 정식 [공사감독일지]의 '업무 내용 및 지시사항' 규격에 맞게 격식 있는 문장으로 다듬어주세요.
+현장에서 감독관이 음성 또는 텍스트로 남긴 거친 구두 메모를 정식 [공사감독일지]의 '업무 내용 및 지시사항' 규격에 맞게 격식 있고 단호한 문장으로 다듬어주세요.
 
 - 지적 구분: ${category}
 - 현장 메모 원문: "${memo}"
 
-[작성 지침]
-1. 2~3문장 이내로 간결하고 단호한 지시문체(~할 것을 지시함, ~조치 요망, ~재시공 지시 등)를 사용하세요.
-2. 불필요한 설명, 인사말, 마크다운 기호 없이 최종 정제된 문장만 출력하세요.
-    `;
+[작성 지침 - 절대 준수]
+1. 불필요한 설명, 인사말, 선택 옵션, 마크다운 기호(따옴표, 볼드 ** 표시) 없이 '오직 최종 공문 지시사항 문장'만 2~3문장으로 출력하세요.
+2. 단호하고 명확한 공문서체(~할 것을 지시함, ~즉시 조치 요망, ~작업 중지 지시 등)를 사용하세요.
+    `.trim();
 
-    const result = await model.generateContent(prompt);
-    const refinedText = result.response.text().trim();
+    let refinedText = '';
+    let lastError = null;
+
+    for (const modelName of candidateModels) {
+      try {
+        const model = aiInstance.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        refinedText = result.response.text().trim();
+        if (refinedText) break;
+      } catch (err) {
+        lastError = err;
+        console.warn(`[Gemini] ${modelName} 시도 실패, 다음 모델로 대체:`, err.message);
+      }
+    }
+
+    if (!refinedText) {
+      throw lastError || new Error('모든 Gemini 모델 응답 실패');
+    }
+
+    console.log('[AI 정제 성공]:', refinedText);
     res.json({ success: true, text: refinedText });
   } catch (error) {
-    console.error('AI 요약 오류:', error);
-    res.status(500).json({ success: false, error: 'AI 문장 정제 중 오류가 발생했습니다.' });
+    console.error('[Gemini AI 요약 오류]:', error);
+    res.status(500).json({
+      success: false,
+      error: `AI 정제 실패: ${error.message || 'Gemini API 오류'}`,
+    });
   }
 });
 
