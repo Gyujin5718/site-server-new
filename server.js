@@ -207,7 +207,15 @@ ${content}
         ] : [],
       };
 
-      const resendApiKey = (process.env.RESEND_API_KEY || '').trim().replace(/^['"]|['"]$/g, '');
+      // 키에 들어갈 수 있는 공백, 줄바꿈, 따옴표, 중복 Bearer 완벽 제거
+      const rawKey = String(process.env.RESEND_API_KEY || '').trim();
+      const resendApiKey = rawKey
+        .replace(/^Bearer\s+/i, '')
+        .replace(/['"\r\n\t]/g, '')
+        .trim();
+
+      console.log(`[Resend 발송 시도] API 키 앞 5자리: ${resendApiKey.slice(0, 5)}..., 전체 길이: ${resendApiKey.length}자`);
+
       const resendRes = await axios.post('https://api.resend.com/emails', resendPayload, {
         headers: {
           Authorization: `Bearer ${resendApiKey}`,
